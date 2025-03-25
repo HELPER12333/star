@@ -25,8 +25,8 @@
 #include "../bitboard.h"
 #include "../position.h"
 #include "../types.h"
-#include "nnue_architecture.h"
 #include "network.h"
+#include "nnue_architecture.h"
 #include "nnue_common.h"
 #include "nnue_feature_transformer.h"
 
@@ -34,22 +34,20 @@ namespace Stockfish::Eval::NNUE {
 
 namespace {
 
-template<Color                                     Perspective,
-         IncUpdateDirection                        Direction = FORWARD,
-         IndexType                                 TransformedFeatureDimensions,
-         Accumulator<TransformedFeatureDimensions> AccumulatorState::*accPtr>
+template<Color              Perspective,
+         IncUpdateDirection Direction = FORWARD,
+         IndexType          TransformedFeatureDimensions>
 void update_accumulator_incremental(
-  const FeatureTransformer<TransformedFeatureDimensions, accPtr>& featureTransformer,
-  const Square                                                    ksq,
-  AccumulatorState&                                               target_state,
-  const AccumulatorState&                                         computed);
+  const FeatureTransformer<TransformedFeatureDimensions>& featureTransformer,
+  const Square                                            ksq,
+  AccumulatorState&                                       target_state,
+  const AccumulatorState&                                 computed);
 
-template<Color Perspective, IndexType Dimensions, Accumulator<Dimensions> AccumulatorState::*accPtr>
-void update_accumulator_refresh_cache(
-  const FeatureTransformer<Dimensions, accPtr>& featureTransformer,
-  const Position&                               pos,
-  AccumulatorState&                             accumulatorState,
-  AccumulatorCaches::Cache<Dimensions>&         cache);
+template<Color Perspective, IndexType Dimensions>
+void update_accumulator_refresh_cache(const FeatureTransformer<Dimensions>& featureTransformer,
+                                      const Position&                       pos,
+                                      AccumulatorState&                     accumulatorState,
+                                      AccumulatorCaches::Cache<Dimensions>& cache);
 
 }
 
@@ -72,18 +70,14 @@ void AccumulatorStack::reset(const Position&    rootPos,
                              AccumulatorCaches& caches) noexcept {
     m_current_idx = 1;
 
-    update_accumulator_refresh_cache<WHITE, TransformedFeatureDimensionsBig,
-                                     &AccumulatorState::accumulatorBig>(
+    update_accumulator_refresh_cache<WHITE, TransformedFeatureDimensionsBig>(
       *networks.big.featureTransformer, rootPos, m_accumulators[0], caches.big);
-    update_accumulator_refresh_cache<BLACK, TransformedFeatureDimensionsBig,
-                                     &AccumulatorState::accumulatorBig>(
+    update_accumulator_refresh_cache<BLACK, TransformedFeatureDimensionsBig>(
       *networks.big.featureTransformer, rootPos, m_accumulators[0], caches.big);
 
-    update_accumulator_refresh_cache<WHITE, TransformedFeatureDimensionsSmall,
-                                     &AccumulatorState::accumulatorSmall>(
+    update_accumulator_refresh_cache<WHITE, TransformedFeatureDimensionsSmall>(
       *networks.small.featureTransformer, rootPos, m_accumulators[0], caches.small);
-    update_accumulator_refresh_cache<BLACK, TransformedFeatureDimensionsSmall,
-                                     &AccumulatorState::accumulatorSmall>(
+    update_accumulator_refresh_cache<BLACK, TransformedFeatureDimensionsSmall>(
       *networks.small.featureTransformer, rootPos, m_accumulators[0], caches.small);
 }
 
@@ -98,24 +92,23 @@ void AccumulatorStack::pop() noexcept {
     m_current_idx--;
 }
 
-template<IndexType Dimensions, Accumulator<Dimensions> AccumulatorState::*accPtr>
-void AccumulatorStack::evaluate(const Position&                               pos,
-                                const FeatureTransformer<Dimensions, accPtr>& featureTransformer,
-                                AccumulatorCaches::Cache<Dimensions>&         cache) noexcept {
+template<IndexType Dimensions>
+void AccumulatorStack::evaluate(const Position&                       pos,
+                                const FeatureTransformer<Dimensions>& featureTransformer,
+                                AccumulatorCaches::Cache<Dimensions>& cache) noexcept {
 
     evaluate_side<WHITE>(pos, featureTransformer, cache);
     evaluate_side<BLACK>(pos, featureTransformer, cache);
 }
 
-template<Color Perspective, IndexType Dimensions, Accumulator<Dimensions> AccumulatorState::*accPtr>
-void AccumulatorStack::evaluate_side(
-  const Position&                               pos,
-  const FeatureTransformer<Dimensions, accPtr>& featureTransformer,
-  AccumulatorCaches::Cache<Dimensions>&         cache) noexcept {
+template<Color Perspective, IndexType Dimensions>
+void AccumulatorStack::evaluate_side(const Position&                       pos,
+                                     const FeatureTransformer<Dimensions>& featureTransformer,
+                                     AccumulatorCaches::Cache<Dimensions>& cache) noexcept {
 
-    const auto last_usable_accum = find_last_usable_accumulator<Perspective, Dimensions, accPtr>();
+    const auto last_usable_accum = find_last_usable_accumulator<Perspective, Dimensions>();
 
-    if ((m_accumulators[last_usable_accum].*accPtr).computed[Perspective])
+    if ((m_accumulators[last_usable_accum].template acc<Dimensions>()).computed[Perspective])
         forward_update_incremental<Perspective>(pos, featureTransformer, last_usable_accum);
 
     else
@@ -127,12 +120,12 @@ void AccumulatorStack::evaluate_side(
 
 // Find the earliest usable accumulator, this can either be a computed accumulator or the accumulator
 // state just before a change that requires full refresh.
-template<Color Perspective, IndexType Dimensions, Accumulator<Dimensions> AccumulatorState::*accPtr>
+template<Color Perspective, IndexType Dimensions>
 std::size_t AccumulatorStack::find_last_usable_accumulator() const noexcept {
 
     for (std::size_t curr_idx = m_current_idx - 1; curr_idx > 0; curr_idx--)
     {
-        if ((m_accumulators[curr_idx].*accPtr).computed[Perspective])
+        if ((m_accumulators[curr_idx].template acc<Dimensions>()).computed[Perspective])
             return curr_idx;
 
         if (FeatureSet::requires_refresh(m_accumulators[curr_idx].dirtyPiece, Perspective))
@@ -142,14 +135,14 @@ std::size_t AccumulatorStack::find_last_usable_accumulator() const noexcept {
     return 0;
 }
 
-template<Color Perspective, IndexType Dimensions, Accumulator<Dimensions> AccumulatorState::*accPtr>
+template<Color Perspective, IndexType Dimensions>
 void AccumulatorStack::forward_update_incremental(
-  const Position&                               pos,
-  const FeatureTransformer<Dimensions, accPtr>& featureTransformer,
-  const std::size_t                             begin) noexcept {
+  const Position&                       pos,
+  const FeatureTransformer<Dimensions>& featureTransformer,
+  const std::size_t                     begin) noexcept {
 
     assert(begin < m_accumulators.size());
-    assert((m_accumulators[begin].*accPtr).computed[Perspective]);
+    assert((m_accumulators[begin].acc<Dimensions>()).computed[Perspective]);
 
     const Square ksq = pos.square<KING>(Perspective);
 
@@ -157,18 +150,18 @@ void AccumulatorStack::forward_update_incremental(
         update_accumulator_incremental<Perspective>(featureTransformer, ksq, m_accumulators[next],
                                                     m_accumulators[next - 1]);
 
-    assert((latest().*accPtr).computed[Perspective]);
+    assert((latest().acc<Dimensions>()).computed[Perspective]);
 }
 
-template<Color Perspective, IndexType Dimensions, Accumulator<Dimensions> AccumulatorState::*accPtr>
+template<Color Perspective, IndexType Dimensions>
 void AccumulatorStack::backward_update_incremental(
-  const Position&                               pos,
-  const FeatureTransformer<Dimensions, accPtr>& featureTransformer,
-  const std::size_t                             end) noexcept {
+  const Position&                       pos,
+  const FeatureTransformer<Dimensions>& featureTransformer,
+  const std::size_t                     end) noexcept {
 
     assert(end < m_accumulators.size());
     assert(end < m_current_idx);
-    assert((latest().*accPtr).computed[Perspective]);
+    assert((latest().acc<Dimensions>()).computed[Perspective]);
 
     const Square ksq = pos.square<KING>(Perspective);
 
@@ -176,42 +169,35 @@ void AccumulatorStack::backward_update_incremental(
         update_accumulator_incremental<Perspective, BACKWARDS>(
           featureTransformer, ksq, m_accumulators[next], m_accumulators[next + 1]);
 
-    assert((m_accumulators[end].*accPtr).computed[Perspective]);
+    assert((m_accumulators[end].acc<Dimensions>()).computed[Perspective]);
 }
 
 // Explicit template instantiations
-template void
-AccumulatorStack::evaluate<TransformedFeatureDimensionsBig, &AccumulatorState::accumulatorBig>(
-  const Position& pos,
-  const FeatureTransformer<TransformedFeatureDimensionsBig, &AccumulatorState::accumulatorBig>&
-                                                             featureTransformer,
+template void AccumulatorStack::evaluate<TransformedFeatureDimensionsBig>(
+  const Position&                                            pos,
+  const FeatureTransformer<TransformedFeatureDimensionsBig>& featureTransformer,
   AccumulatorCaches::Cache<TransformedFeatureDimensionsBig>& cache) noexcept;
-template void
-AccumulatorStack::evaluate<TransformedFeatureDimensionsSmall, &AccumulatorState::accumulatorSmall>(
-  const Position& pos,
-  const FeatureTransformer<TransformedFeatureDimensionsSmall, &AccumulatorState::accumulatorSmall>&
-                                                               featureTransformer,
+template void AccumulatorStack::evaluate<TransformedFeatureDimensionsSmall>(
+  const Position&                                              pos,
+  const FeatureTransformer<TransformedFeatureDimensionsSmall>& featureTransformer,
   AccumulatorCaches::Cache<TransformedFeatureDimensionsSmall>& cache) noexcept;
 
 
 namespace {
 
-template<Color                                     Perspective,
-         IncUpdateDirection                        Direction,
-         IndexType                                 TransformedFeatureDimensions,
-         Accumulator<TransformedFeatureDimensions> AccumulatorState::*accPtr>
+template<Color Perspective, IncUpdateDirection Direction, IndexType TransformedFeatureDimensions>
 void update_accumulator_incremental(
-  const FeatureTransformer<TransformedFeatureDimensions, accPtr>& featureTransformer,
-  const Square                                                    ksq,
-  AccumulatorState&                                               target_state,
-  const AccumulatorState&                                         computed) {
+  const FeatureTransformer<TransformedFeatureDimensions>& featureTransformer,
+  const Square                                            ksq,
+  AccumulatorState&                                       target_state,
+  const AccumulatorState&                                 computed) {
     [[maybe_unused]] constexpr bool Forward   = Direction == FORWARD;
     [[maybe_unused]] constexpr bool Backwards = Direction == BACKWARDS;
 
     assert(Forward != Backwards);
 
-    assert((computed.*accPtr).computed[Perspective]);
-    assert(!(target_state.*accPtr).computed[Perspective]);
+    assert((computed.acc<TransformedFeatureDimensions>()).computed[Perspective]);
+    assert(!(target_state.acc<TransformedFeatureDimensions>()).computed[Perspective]);
 
     // The size must be enough to contain the largest possible update.
     // That might depend on the feature set and generally relies on the
@@ -228,12 +214,13 @@ void update_accumulator_incremental(
 
     if (removed.size() == 0 && added.size() == 0)
     {
-        std::memcpy((target_state.*accPtr).accumulation[Perspective],
-                    (computed.*accPtr).accumulation[Perspective],
+        std::memcpy((target_state.acc<TransformedFeatureDimensions>()).accumulation[Perspective],
+                    (computed.acc<TransformedFeatureDimensions>()).accumulation[Perspective],
                     TransformedFeatureDimensions * sizeof(BiasType));
-        std::memcpy((target_state.*accPtr).psqtAccumulation[Perspective],
-                    (computed.*accPtr).psqtAccumulation[Perspective],
-                    PSQTBuckets * sizeof(PSQTWeightType));
+        std::memcpy(
+          (target_state.acc<TransformedFeatureDimensions>()).psqtAccumulation[Perspective],
+          (computed.acc<TransformedFeatureDimensions>()).psqtAccumulation[Perspective],
+          PSQTBuckets * sizeof(PSQTWeightType));
     }
     else
     {
@@ -246,10 +233,10 @@ void update_accumulator_incremental(
             assert(removed.size() <= added.size());
 
 #ifdef VECTOR
-        auto* accIn =
-          reinterpret_cast<const vec_t*>(&(computed.*accPtr).accumulation[Perspective][0]);
-        auto* accOut =
-          reinterpret_cast<vec_t*>(&(target_state.*accPtr).accumulation[Perspective][0]);
+        auto* accIn = reinterpret_cast<const vec_t*>(
+          &(computed.acc<TransformedFeatureDimensions>()).accumulation[Perspective][0]);
+        auto* accOut = reinterpret_cast<vec_t*>(
+          &(target_state.acc<TransformedFeatureDimensions>()).accumulation[Perspective][0]);
 
         const IndexType offsetA0 = TransformedFeatureDimensions * added[0];
         auto* columnA0 = reinterpret_cast<const vec_t*>(&featureTransformer.weights[offsetA0]);
@@ -299,10 +286,10 @@ void update_accumulator_incremental(
                                                             vec_add_16(columnR0[i], columnR1[i])));
         }
 
-        auto* accPsqtIn =
-          reinterpret_cast<const psqt_vec_t*>(&(computed.*accPtr).psqtAccumulation[Perspective][0]);
-        auto* accPsqtOut =
-          reinterpret_cast<psqt_vec_t*>(&(target_state.*accPtr).psqtAccumulation[Perspective][0]);
+        auto* accPsqtIn = reinterpret_cast<const psqt_vec_t*>(
+          &(computed.acc<TransformedFeatureDimensions>()).psqtAccumulation[Perspective][0]);
+        auto* accPsqtOut = reinterpret_cast<psqt_vec_t*>(
+          &(target_state.acc<TransformedFeatureDimensions>()).psqtAccumulation[Perspective][0]);
 
         const IndexType offsetPsqtA0 = PSQTBuckets * added[0];
         auto*           columnPsqtA0 =
@@ -357,23 +344,25 @@ void update_accumulator_incremental(
                                                 vec_add_psqt_32(columnPsqtR0[i], columnPsqtR1[i])));
         }
 #else
-        std::memcpy((target_state.*accPtr).accumulation[Perspective],
-                    (computed.*accPtr).accumulation[Perspective],
+        std::memcpy((target_state.acc<TransformedFeatureDimensions>()).accumulation[Perspective],
+                    (computed.acc<TransformedFeatureDimensions>()).accumulation[Perspective],
                     TransformedFeatureDimensions * sizeof(BiasType));
-        std::memcpy((target_state.*accPtr).psqtAccumulation[Perspective],
-                    (computed.*accPtr).psqtAccumulation[Perspective],
-                    PSQTBuckets * sizeof(PSQTWeightType));
+        std::memcpy(
+          (target_state.acc<TransformedFeatureDimensions>()).psqtAccumulation[Perspective],
+          (computed.acc<TransformedFeatureDimensions>()).psqtAccumulation[Perspective],
+          PSQTBuckets * sizeof(PSQTWeightType));
 
         // Difference calculation for the deactivated features
         for (const auto index : removed)
         {
             const IndexType offset = TransformedFeatureDimensions * index;
             for (IndexType i = 0; i < TransformedFeatureDimensions; ++i)
-                (target_state.*accPtr).accumulation[Perspective][i] -=
+                (target_state.acc<TransformedFeatureDimensions>()).accumulation[Perspective][i] -=
                   featureTransformer.weights[offset + i];
 
             for (std::size_t i = 0; i < PSQTBuckets; ++i)
-                (target_state.*accPtr).psqtAccumulation[Perspective][i] -=
+                (target_state.acc<TransformedFeatureDimensions>())
+                  .psqtAccumulation[Perspective][i] -=
                   featureTransformer.psqtWeights[index * PSQTBuckets + i];
         }
 
@@ -382,25 +371,25 @@ void update_accumulator_incremental(
         {
             const IndexType offset = TransformedFeatureDimensions * index;
             for (IndexType i = 0; i < TransformedFeatureDimensions; ++i)
-                (target_state.*accPtr).accumulation[Perspective][i] +=
+                (target_state.acc<TransformedFeatureDimensions>()).accumulation[Perspective][i] +=
                   featureTransformer.weights[offset + i];
 
             for (std::size_t i = 0; i < PSQTBuckets; ++i)
-                (target_state.*accPtr).psqtAccumulation[Perspective][i] +=
+                (target_state.acc<TransformedFeatureDimensions>())
+                  .psqtAccumulation[Perspective][i] +=
                   featureTransformer.psqtWeights[index * PSQTBuckets + i];
         }
 #endif
     }
 
-    (target_state.*accPtr).computed[Perspective] = true;
+    (target_state.acc<TransformedFeatureDimensions>()).computed[Perspective] = true;
 }
 
-template<Color Perspective, IndexType Dimensions, Accumulator<Dimensions> AccumulatorState::*accPtr>
-void update_accumulator_refresh_cache(
-  const FeatureTransformer<Dimensions, accPtr>& featureTransformer,
-  const Position&                               pos,
-  AccumulatorState&                             accumulatorState,
-  AccumulatorCaches::Cache<Dimensions>&         cache) {
+template<Color Perspective, IndexType Dimensions>
+void update_accumulator_refresh_cache(const FeatureTransformer<Dimensions>& featureTransformer,
+                                      const Position&                       pos,
+                                      AccumulatorState&                     accumulatorState,
+                                      AccumulatorCaches::Cache<Dimensions>& cache) {
     using Tiling [[maybe_unused]] = SIMDTiling<Dimensions, Dimensions>;
 
     const Square          ksq   = pos.square<KING>(Perspective);
@@ -430,7 +419,7 @@ void update_accumulator_refresh_cache(
         }
     }
 
-    auto& accumulator                 = accumulatorState.*accPtr;
+    auto& accumulator                 = accumulatorState.acc<Dimensions>();
     accumulator.computed[Perspective] = true;
 
 #ifdef VECTOR
